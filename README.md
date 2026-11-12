@@ -1,55 +1,68 @@
 # TraceVanta
 
-**Automated Cloud Detection & Response (CDR) on AWS**
+**Automated Cloud Detection and Response on AWS**
 
-TraceVanta demonstrates the implementation of an automated security operations (SecOps) system on Amazon Web Services. The system is designed to detect, respond to, and notify about specific security threats in real-time, significantly reducing the Mean Time to Detect (MTTD) and Mean Time to Respond (MTTR).
+TraceVanta is a hands-on implementation of an event-driven security operations workflow on AWS. It detects two threat scenarios — S3 data exfiltration and internal reconnaissance — and executes containment playbooks automatically, shortening the window between detection and response.
 
-> All resources and data in this repository are synthetic. The lab ran in an isolated AWS account created only for these simulations.
+> All resources and data in this repository are synthetic. The environment was an isolated AWS account created solely for this project.
 
 ## Table of Contents
 
-- [Architecture Diagram](#architecture-diagram)
+- [Architecture](#architecture)
+- [Detection and Response Pipeline](#detection-and-response-pipeline)
 - [Key Features](#key-features)
-- [Results Summary](#results-summary)
+- [Detection Matrix](#detection-matrix)
 - [Tech Stack](#tech-stack)
 - [Repository Structure](#repository-structure)
-- [Project Implementation Steps](#project-implementation-steps)
-  - [Phase 1: Lab Environment Setup](#phase-1-lab-environment-setup)
-  - [Phase 2: Detection Services Configuration](#phase-2-detection-services-configuration)
-  - [Phase 3: Automated Response Flow Implementation](#phase-3-automated-response-flow-implementation)
-  - [Phase 4: Attack Simulation & Results](#phase-4-attack-simulation--results)
-    - [Test 1: Data Exfiltration](#test-1-data-exfiltration)
-    - [Test 2: Lateral Movement](#test-2-lateral-movement)
-- [Conclusion & Key Takeaways](#conclusion--key-takeaways)
+- [Implementation](#implementation)
+  - [Phase 1: Lab Environment](#phase-1-lab-environment)
+  - [Phase 2: Detection Services](#phase-2-detection-services)
+  - [Phase 3: Automated Response](#phase-3-automated-response)
+  - [Phase 4: Validation](#phase-4-validation)
+- [Configuration Reference](#configuration-reference)
+- [Design Notes and Limitations](#design-notes-and-limitations)
+- [Skills Demonstrated](#skills-demonstrated)
 
----
+## Architecture
 
-## Architecture Diagram
+![TraceVanta architecture workflow](Architecture_Workflow.png)
 
-[<img src="Architecture_Workflow.png" alt="Architecture Workflow" width="1000"/>](Architecture_Workflow.png)
+The editable diagram is available in [`Architecture_Workflow.drawio`](Architecture_Workflow.drawio).
+
+## Detection and Response Pipeline
+
+1. **Telemetry** — CloudTrail records S3 data events; VPC Flow Logs and CloudTrail events feed GuardDuty.
+2. **Detection** — A CloudWatch metric filter and alarm detect abnormal `GetObject` volume. GuardDuty detects reconnaissance behavior.
+3. **Routing** — EventBridge rules forward alarm state changes and GuardDuty findings to a single Lambda function.
+4. **Response** — The Lambda playbook applies the appropriate containment action and publishes an SNS notification.
+5. **Evidence** — The compromised instance is isolated and an EBS snapshot is preserved for investigation.
 
 ## Key Features
 
-- **Automated Threat Detection:** Utilizes native AWS services like GuardDuty and CloudWatch to detect malicious activities and policy violations.
-- **Real-time Automated Response:** Employs AWS Lambda and EventBridge to execute predefined response playbooks, such as isolating compromised resources and gathering forensic evidence.
-- **Data-Centric Security Monitoring:** Actively monitors sensitive data stored in S3 for signs of exfiltration.
-- **Behavioral Analysis:** Detects post-compromise activities like internal network reconnaissance (Lateral Movement).
-- **Serverless & Scalable:** Built on a serverless architecture, ensuring high availability and cost-efficiency.
+- **Native detection:** GuardDuty, CloudTrail, and CloudWatch Alarms, with no third-party tooling.
+- **Automated containment:** Lambda playbooks isolate a compromised EC2 instance and preserve forensic evidence.
+- **Data-centric monitoring:** S3 access patterns are monitored for signs of exfiltration.
+- **Behavioral detection:** Internal reconnaissance is detected through GuardDuty findings.
+- **Event-driven and serverless:** EventBridge, Lambda, and SNS keep the response path scalable and low-maintenance.
+- **Operational visibility:** SNS email alerts summarize each finding and the actions taken.
 
-## Results Summary
+## Detection Matrix
 
-| Scenario | Detection | Automated response |
-|---|---|---|
-| S3 data exfiltration | CloudWatch alarm on repeated `GetObject` calls (3 objects within a 5-minute window) | SNS email alert to the security contact |
-| Lateral movement (port scan) | GuardDuty `Recon:EC2/Portscan` finding | EC2 instance quarantined, EBS forensic snapshot created, SNS alert sent |
+| Scenario | Signal | Detection | Automated response |
+|---|---|---|---|
+| S3 data exfiltration | More than two `GetObject` calls within a five-minute window | CloudTrail data events → CloudWatch metric filter and alarm | SNS email notification |
+| Lateral movement | Port scan against the internal RDS endpoint | GuardDuty `Recon:EC2/Portscan` finding | EC2 instance quarantined, EBS forensic snapshot created, SNS notification |
 
 ## Tech Stack
 
-- **Threat Detection:** Amazon GuardDuty, AWS CloudTrail, Amazon CloudWatch Alarms
-- **Automated Response & Processing:** AWS Lambda (Python), AWS EventBridge
-- **Infrastructure:** Amazon EC2, Amazon S3, Amazon RDS, Amazon VPC
-- **Notifications:** Amazon SNS (Simple Notification Service)
-- **Identity & Access Management:** AWS IAM
+| Layer | Services |
+|---|---|
+| Threat detection | Amazon GuardDuty, AWS CloudTrail, Amazon CloudWatch |
+| Automated response | AWS Lambda (Python 3.9), Amazon EventBridge |
+| Infrastructure | Amazon VPC, Amazon EC2, Amazon S3, Amazon RDS |
+| Notifications | Amazon SNS |
+| Identity and access | AWS IAM |
+| Region | `ap-southeast-1` (Singapore) |
 
 ## Repository Structure
 
@@ -60,209 +73,243 @@ TraceVanta demonstrates the implementation of an automated security operations (
 ├── Playbooks/
 │   └── lambda_function.py          # EventBridge-triggered response playbook
 ├── S3_Sensitive_Data_Sample/       # Synthetic data used in the exfiltration test
-└── images/                         # Implementation and test screenshots
+└── images/                         # Implementation and validation screenshots
 ```
 
-## Project Implementation Steps
+## Implementation
 
-This project was built from the ground up on AWS. The following sections outline the key phases of implementation, from building the foundational infrastructure to testing the final automated response system.
+### Phase 1: Lab Environment
 
-### Phase 1: Lab Environment Setup
+A single-region lab in `ap-southeast-1` provides both the attack surface and the protected assets.
 
-The first phase involved creating a realistic, isolated cloud environment in the `ap-southeast-1` (Singapore) region to serve as the attack surface.
-* **VPC and Networking:** A Virtual Private Cloud (VPC) was created with one public and one private subnet. This provides a secure and isolated network foundation for all other resources.
+- **Network:** A VPC with one public and one private subnet.
+- **EC2:** A `t3.micro` instance in the public subnet serves as the initial point of compromise.
+- **S3:** A private bucket holds synthetic sensitive documents and has public access fully blocked.
+- **RDS:** A `db.t3.micro` MySQL instance in the private subnet, with public access disabled, serves as the internal target.
+- **IAM:** An `EC2-S3-Access-Role` grants the instance read-only access to the bucket, enabling the exfiltration simulation.
 
-![image](images/1.jpg)
-![image](images/2.jpg)
-![image](images/3.jpg)
-![image](images/4.jpg)
-![image](images/5.jpg)
-![image](images/6.jpg)
-    
+<details>
+<summary>VPC and networking screenshots (6)</summary>
 
-* **EC2 Instance:** A `t3.micro` EC2 instance was launched into the public subnet to act as the initial point of compromise for attack simulations.
+![VPC configuration](images/1.jpg)
+![VPC configuration](images/2.jpg)
+![VPC configuration](images/3.jpg)
+![VPC configuration](images/4.jpg)
+![VPC configuration](images/5.jpg)
+![VPC configuration](images/6.jpg)
 
-![image](images/7.jpg)
-![image](images/8.jpg)
-![image](images/9.jpg)
-![image](images/10.jpg)
-![image](images/11.jpg)
-![image](images/12.jpg)
-![image](images/13.jpg)
-    
-* **S3 Bucket:** A private S3 bucket was created to store simulated sensitive files (`customer-list.txt`, `financial-report-q3.txt`, etc.), serving as the target for the data exfiltration scenario. Public access was completely blocked.
+</details>
 
-![image](images/14.jpg)
-![image](images/15.jpg)
-![image](images/16.jpg)
-![image](images/17.jpg)
-![image](images/18.jpg)
-![image](images/19.jpg)
-![image](images/20.jpg)
-![image](images/21.jpg)
-    
+<details>
+<summary>EC2 instance screenshots (7)</summary>
 
-* **RDS Database:** A `db.t3.micro` MySQL RDS instance was deployed into the private subnet with public access disabled. This serves as a high-value internal target for the lateral movement scenario.
+![EC2 instance configuration](images/7.jpg)
+![EC2 instance configuration](images/8.jpg)
+![EC2 instance configuration](images/9.jpg)
+![EC2 instance configuration](images/10.jpg)
+![EC2 instance configuration](images/11.jpg)
+![EC2 instance configuration](images/12.jpg)
+![EC2 instance configuration](images/13.jpg)
 
-![image](images/22.jpg)
-![image](images/23.jpg)
-![image](images/24.jpg)
-![image](images/25.jpg)
-![image](images/26.jpg)
-![image](images/27.jpg)
-![image](images/28.jpg)
-![image](images/29.jpg)
-    
+</details>
 
-* **IAM Role:** An IAM Role (`EC2-S3-Access-Role`) was created and attached to the EC2 instance, granting it read-only permissions to the S3 bucket. This is a crucial step to enable the data exfiltration simulation.
+<details>
+<summary>S3 bucket screenshots (8)</summary>
 
-![image](images/30.jpg)
-![image](images/31.jpg)
-![image](images/32.jpg)
-![image](images/33.jpg)
-![image](images/34.jpg)
-    
+![S3 bucket configuration](images/14.jpg)
+![S3 bucket configuration](images/15.jpg)
+![S3 bucket configuration](images/16.jpg)
+![S3 bucket configuration](images/17.jpg)
+![S3 bucket configuration](images/18.jpg)
+![S3 bucket configuration](images/19.jpg)
+![S3 bucket configuration](images/20.jpg)
+![S3 bucket configuration](images/21.jpg)
 
-### Phase 2: Detection Services Configuration
-With the environment in place, the next step was to deploy the security "sensors" to monitor for malicious activity.
+</details>
 
-* **AWS CloudTrail:** A trail (`CDR-S3-Monitoring-Trail`) was configured to specifically log S3 Data Events (Read actions like `GetObject`). Logs are delivered to a dedicated S3 bucket and CloudWatch Logs for analysis.
+<details>
+<summary>RDS database screenshots (8)</summary>
 
-![image](images/35.jpg)
-![image](images/36.jpg)
-![image](images/37.jpg)
-![image](images/38.jpg)
-![image](images/39.jpg)
-    
+![RDS configuration](images/22.jpg)
+![RDS configuration](images/23.jpg)
+![RDS configuration](images/24.jpg)
+![RDS configuration](images/25.jpg)
+![RDS configuration](images/26.jpg)
+![RDS configuration](images/27.jpg)
+![RDS configuration](images/28.jpg)
+![RDS configuration](images/29.jpg)
 
-* **Amazon CloudWatch:** A Metric Filter was created to parse the CloudTrail logs and count `GetObject` events. An Alarm (`S3DataExfiltrationDetected`) was then configured to trigger if more than 2 `GetObject` events occurred within a 5-minute window.
+</details>
 
-![image](images/40.jpg)
-![image](images/41.jpg)
-![image](images/42.jpg)
-![image](images/43.jpg)
-![image](images/44.jpg)
-![image](images/45.jpg)
-![image](images/46.jpg)
-![image](images/47.jpg)
-    
+<details>
+<summary>IAM role screenshots (5)</summary>
 
-* **Amazon GuardDuty:** GuardDuty was enabled for the region. This service acts as an intelligent threat detection system, automatically analyzing VPC Flow Logs and CloudTrail events to identify threats like port scanning.
+![IAM role configuration](images/30.jpg)
+![IAM role configuration](images/31.jpg)
+![IAM role configuration](images/32.jpg)
+![IAM role configuration](images/33.jpg)
+![IAM role configuration](images/34.jpg)
 
-![image](images/48.jpg)
-![image](images/49.jpg)
-  
+</details>
 
-### Phase 3: Automated Response Flow Implementation
-This phase involved connecting the detection services to an automated response engine.
+### Phase 2: Detection Services
 
-* **AWS Lambda:** A Python-based Lambda function (`CDR-Response-Function`) was created to act as the central "brain" of the system. The code contains the logic to handle different threats and execute specific containment actions.
+- **AWS CloudTrail:** The `CDR-S3-Monitoring-Trail` trail logs S3 data events such as `GetObject` to a dedicated bucket and to CloudWatch Logs.
+- **Amazon CloudWatch:** A metric filter counts `GetObject` events, and the `S3DataExfiltrationDetected` alarm enters the `ALARM` state when more than two events occur within five minutes.
+- **Amazon GuardDuty:** Enabled for the region to analyze VPC Flow Logs and CloudTrail events for threats such as port scanning.
 
-![image](images/50.jpg)
-![image](images/51.jpg)
+<details>
+<summary>CloudTrail screenshots (5)</summary>
+
+![CloudTrail configuration](images/35.jpg)
+![CloudTrail configuration](images/36.jpg)
+![CloudTrail configuration](images/37.jpg)
+![CloudTrail configuration](images/38.jpg)
+![CloudTrail configuration](images/39.jpg)
+
+</details>
+
+<details>
+<summary>CloudWatch screenshots (8)</summary>
+
+![CloudWatch configuration](images/40.jpg)
+![CloudWatch configuration](images/41.jpg)
+![CloudWatch configuration](images/42.jpg)
+![CloudWatch configuration](images/43.jpg)
+![CloudWatch configuration](images/44.jpg)
+![CloudWatch configuration](images/45.jpg)
+![CloudWatch configuration](images/46.jpg)
+![CloudWatch configuration](images/47.jpg)
+
+</details>
+
+<details>
+<summary>GuardDuty screenshots (2)</summary>
+
+![GuardDuty configuration](images/48.jpg)
+![GuardDuty configuration](images/49.jpg)
+
+</details>
+
+### Phase 3: Automated Response
+
+The Python Lambda function `CDR-Response-Function` is the single entry point for all events. It routes GuardDuty findings to the lateral movement playbook and CloudWatch alarm state changes to the exfiltration playbook.
+
+- **Lateral movement playbook:** Finds or creates the `Quarantine-SG` security group, attaches it to the affected instance, creates an EBS snapshot for forensics, and sends an SNS alert.
+- **S3 exfiltration playbook:** Sends an SNS alert with the alarm details and a pointer to CloudTrail for object-level analysis.
+- **Error handling:** Exceptions are caught at the handler boundary and reported through SNS, so failures remain visible during incident response.
+- **SNS:** The alert topic delivers email notifications to the security contact.
+- **EventBridge:** `Catch-S3-Exfiltration-Alarm` matches the CloudWatch alarm state change, and `Catch-Lateral-Movement-Finding` matches GuardDuty findings. Both invoke the same Lambda function.
 
 **Source code:** [`Playbooks/lambda_function.py`](Playbooks/lambda_function.py)
 
 **Runtime configuration**
 
-- Python 3.12 runtime with the environment variable `SNS_TOPIC_ARN` set to the alert topic.
-- Dependencies: `boto3` is provided by the Lambda runtime, so no package is bundled.
-- The lab used `AmazonEC2FullAccess` and `AmazonSNSFullAccess` for simplicity. A production deployment should scope permissions down to `ec2:Describe*`, `ec2:ModifyInstanceAttribute`, `ec2:CreateSnapshot`, and `sns:Publish`.
+| Setting | Value |
+|---|---|
+| Runtime | Python 3.9 |
+| Environment variable | `SNS_TOPIC_ARN` — ARN of the alert topic |
+| Dependencies | `boto3`, provided by the Lambda runtime |
+| Lab IAM policies | `AmazonEC2FullAccess`, `AmazonSNSFullAccess` |
 
-![image](images/55.jpg)
+For production, scope the execution role to the required actions: `ec2:Describe*`, `ec2:ModifyInstanceAttribute`, `ec2:CreateSnapshot`, and `sns:Publish`.
 
-* **Lambda Permissions:** The Lambda function's execution role was granted the necessary permissions (`AmazonEC2FullAccess`, `AmazonSNSFullAccess`) to manage EC2 instances and send notifications.
+<details>
+<summary>Lambda screenshots (3)</summary>
 
-![image](images/52.jpg)
+![Lambda function](images/50.jpg)
+![Lambda function](images/51.jpg)
+![Lambda environment variable](images/55.jpg)
 
-* **Amazon SNS:** Email notifications are delivered to the security contact.
+</details>
 
-![image](images/53.jpg)
-![image](images/54.jpg)
+<details>
+<summary>Lambda permissions screenshot (1)</summary>
 
-* **AWS EventBridge:** Two rules were created to act as the "nervous system":
+![Lambda execution role](images/52.jpg)
 
-![image](images/56.jpg)
+</details>
 
-    - A rule (`Catch-S3-Exfiltration-Alarm`) to capture the `ALARM` state from the specific CloudWatch Alarm.
+<details>
+<summary>SNS screenshots (2)</summary>
 
-![image](images/57.jpg)
-![image](images/58.jpg)
-![image](images/59.jpg)
+![SNS configuration](images/53.jpg)
+![SNS configuration](images/54.jpg)
 
-    - A rule (`Catch-Lateral-Movement-Finding`) to capture all new findings from GuardDuty.
+</details>
 
-![image](images/60.jpg)
-    
-    - Both rules were configured to trigger the same `CDR-Response-Function` Lambda function.
- 
+<details>
+<summary>EventBridge rules screenshots (5)</summary>
 
-### Phase 4: Attack Simulation & Results
+![EventBridge rule](images/56.jpg)
+![EventBridge rule](images/57.jpg)
+![EventBridge rule](images/58.jpg)
+![EventBridge rule](images/59.jpg)
+![EventBridge rule](images/60.jpg)
 
-The final phase was to test the system by simulating the two defined attack scenarios.
+</details>
+
+### Phase 4: Validation
+
+Both scenarios were simulated from the compromised EC2 instance.
 
 #### Test 1: Data Exfiltration
 
-* **Attack:** Executed `aws s3 cp` commands from the compromised EC2 instance to download 3 files from the sensitive S3 bucket.
+Three objects were downloaded from the sensitive bucket with `aws s3 cp`.
 
-![image](images/61.jpg)
-![image](images/62.jpg)
+![Exfiltration command](images/61.jpg)
+![Exfiltration command](images/62.jpg)
 
-* **Result:** The system responded as designed.
-- The CloudWatch Alarm successfully transitioned to the **"In alarm"** state.
+**Result**
 
-![image](images/63.jpg)
- 
-- An email notification was immediately sent via SNS.
+- The CloudWatch alarm transitioned to the **In alarm** state.
+- An SNS email notification was delivered immediately.
 
-![image](images/64.jpg)
-        
+![CloudWatch alarm state](images/63.jpg)
+![SNS email notification](images/64.jpg)
+
 #### Test 2: Lateral Movement
 
-* **Attack:** Executed an `nmap -Pn` port scan from the compromised EC2 instance against the internal RDS database endpoint.
+A port scan was run against the internal RDS endpoint with `nmap -Pn`.
 
-![image](images/65.jpg)
-![image](images/66.jpg)
+![Port scan command](images/65.jpg)
+![Port scan command](images/66.jpg)
 
-* **Result:** The system detected and responded successfully.
-- GuardDuty generated a **`Recon:EC2/Portscan`** finding.
+**Result**
 
-![image](images/67.jpg)
+- GuardDuty generated a `Recon:EC2/Portscan` finding.
+- The instance security group was replaced with `Quarantine-SG`, isolating it from the network.
+- An EBS snapshot was created for forensic investigation.
+- An SNS alert reported the finding, the containment actions, and the handled snapshot rate-limit error.
 
+![GuardDuty finding](images/67.jpg)
+![Instance quarantined](images/68.jpg)
+![Forensic EBS snapshot](images/70.jpg)
+![SNS alert](images/69.jpg)
 
-- The EC2 instance's security group was changed to a **"Quarantine-SG"**, successfully isolating it from the network.
+## Configuration Reference
 
-![image](images/68.jpg)
+| Component | Identifier |
+|---|---|
+| Lambda function | `CDR-Response-Function` |
+| CloudTrail trail | `CDR-S3-Monitoring-Trail` |
+| CloudWatch alarm | `S3DataExfiltrationDetected` |
+| EventBridge rules | `Catch-S3-Exfiltration-Alarm`, `Catch-Lateral-Movement-Finding` |
+| Quarantine security group | `Quarantine-SG` |
+| SNS topic | `CDR-Security-Alerts` |
 
-- An EBS **snapshot** was created for forensic purposes.
+## Design Notes and Limitations
 
-![image](images/70.jpg)
+- **Object-level response:** The CloudWatch alarm carries the alarm state but not the names of the accessed objects. A production playbook would query CloudTrail for the relevant time window and act on those objects, for example with `s3.put_object_tagging()`.
+- **Least privilege:** The lab uses broad AWS-managed policies for speed. A production deployment should use a narrowly scoped execution role.
+- **Infrastructure as code:** Resources were provisioned through the AWS console. Migrating the lab to CDK or Terraform is a natural next step.
+- **Scope:** The system is single-region. Multi-region aggregation and integration with AWS Security Hub are out of scope.
+- **Rate limits:** The snapshot API returned a rate-limit error during validation; the error was surfaced through SNS, which confirmed the handler's failure path.
 
-- A detailed notification was sent via SNS, including the error for rate-limiting on subsequent snapshot attempts, proving the error handling worked.
+## Skills Demonstrated
 
-![image](images/69.jpg)
-
-
-## Conclusion & Key Takeaways
-
-This project successfully demonstrates the power of native AWS services in building a robust, cost-effective, and highly automated Cloud Detection and Response system. By integrating services like GuardDuty, CloudWatch, Lambda, and EventBridge, it's possible to create a security posture that not only detects threats in real-time but also contains them automatically, drastically reducing the window of opportunity for attackers.
-
-**Key achievements and learnings from this project include:**
-
-- **Hands-On Experience:** Gained practical, hands-on experience in configuring and integrating core AWS security and serverless services.
-- **Security as Code:** Developed a Python-based Lambda function to programmatically execute security playbooks, a fundamental concept in modern DevSecOps.
-- **Understanding Attacker Techniques:** Successfully simulated realistic attack scenarios, providing valuable insight into how threats like data exfiltration and lateral movement manifest in a cloud environment.
-- **Demonstrated Value of Automation:** Proved that automation is key to achieving rapid response times (low MTTR), which is critical for effective incident response and minimizing potential damage from a security breach.
-
-This project serves as a strong foundation and a practical demonstration of the skills required for a role in cloud security, system engineering, or network engineering, showcasing the ability to not only build but also secure cloud infrastructure.
-
-
-
-
-
-
-
-
-
-
-
+- Detection engineering with native AWS security services
+- Serverless response automation with EventBridge, Lambda, and SNS
+- Incident containment and forensic evidence preservation
+- CloudTrail data event analysis and CloudWatch metric filters
+- Secure VPC, EC2, S3, RDS, and IAM configuration
