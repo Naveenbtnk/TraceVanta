@@ -285,7 +285,6 @@ A port scan was run against the internal RDS endpoint with `nmap -Pn`.
 ![GuardDuty finding](images/67.jpg)
 ![Instance quarantined](images/68.jpg)
 ![Forensic EBS snapshot](images/70.jpg)
-![SNS alert](images/69.jpg)
 
 ## Configuration Reference
 
