@@ -4,11 +4,15 @@
 
 TraceVanta demonstrates the implementation of an automated security operations (SecOps) system on Amazon Web Services. The system is designed to detect, respond to, and notify about specific security threats in real-time, significantly reducing the Mean Time to Detect (MTTD) and Mean Time to Respond (MTTR).
 
-## 📑 Table of Contents
+> All resources and data in this repository are synthetic. The lab ran in an isolated AWS account created only for these simulations.
+
+## Table of Contents
 
 - [Architecture Diagram](#architecture-diagram)
 - [Key Features](#key-features)
+- [Results Summary](#results-summary)
 - [Tech Stack](#tech-stack)
+- [Repository Structure](#repository-structure)
 - [Project Implementation Steps](#project-implementation-steps)
   - [Phase 1: Lab Environment Setup](#phase-1-lab-environment-setup)
   - [Phase 2: Detection Services Configuration](#phase-2-detection-services-configuration)
@@ -32,6 +36,13 @@ TraceVanta demonstrates the implementation of an automated security operations (
 - **Behavioral Analysis:** Detects post-compromise activities like internal network reconnaissance (Lateral Movement).
 - **Serverless & Scalable:** Built on a serverless architecture, ensuring high availability and cost-efficiency.
 
+## Results Summary
+
+| Scenario | Detection | Automated response |
+|---|---|---|
+| S3 data exfiltration | CloudWatch alarm on repeated `GetObject` calls (3 objects within a 5-minute window) | SNS email alert to the security contact |
+| Lateral movement (port scan) | GuardDuty `Recon:EC2/Portscan` finding | EC2 instance quarantined, EBS forensic snapshot created, SNS alert sent |
+
 ## Tech Stack
 
 - **Threat Detection:** Amazon GuardDuty, AWS CloudTrail, Amazon CloudWatch Alarms
@@ -39,6 +50,18 @@ TraceVanta demonstrates the implementation of an automated security operations (
 - **Infrastructure:** Amazon EC2, Amazon S3, Amazon RDS, Amazon VPC
 - **Notifications:** Amazon SNS (Simple Notification Service)
 - **Identity & Access Management:** AWS IAM
+
+## Repository Structure
+
+```text
+.
+├── Architecture_Workflow.drawio    # Editable architecture diagram
+├── Architecture_Workflow.png       # Architecture diagram
+├── Playbooks/
+│   └── lambda_function.py          # EventBridge-triggered response playbook
+├── S3_Sensitive_Data_Sample/       # Synthetic data used in the exfiltration test
+└── images/                         # Implementation and test screenshots
+```
 
 ## Project Implementation Steps
 
@@ -50,6 +73,7 @@ The first phase involved creating a realistic, isolated cloud environment in the
 * **VPC and Networking:** A Virtual Private Cloud (VPC) was created with one public and one private subnet. This provides a secure and isolated network foundation for all other resources.
 
 ![image](images/1.jpg)
+![image](images/2.jpg)
 ![image](images/3.jpg)
 ![image](images/4.jpg)
 ![image](images/5.jpg)
@@ -137,14 +161,21 @@ This phase involved connecting the detection services to an automated response e
 ![image](images/50.jpg)
 ![image](images/51.jpg)
 
-👉 **Source code:** [`Playbooks/lambda_function.py`](Playbooks/lambda_function.py)
-    
+**Source code:** [`Playbooks/lambda_function.py`](Playbooks/lambda_function.py)
+
+**Runtime configuration**
+
+- Python 3.12 runtime with the environment variable `SNS_TOPIC_ARN` set to the alert topic.
+- Dependencies: `boto3` is provided by the Lambda runtime, so no package is bundled.
+- The lab used `AmazonEC2FullAccess` and `AmazonSNSFullAccess` for simplicity. A production deployment should scope permissions down to `ec2:Describe*`, `ec2:ModifyInstanceAttribute`, `ec2:CreateSnapshot`, and `sns:Publish`.
+
+![image](images/55.jpg)
 
 * **Lambda Permissions:** The Lambda function's execution role was granted the necessary permissions (`AmazonEC2FullAccess`, `AmazonSNSFullAccess`) to manage EC2 instances and send notifications.
 
 ![image](images/52.jpg)
 
-* **Amazon SNS:** Send nofitication through email
+* **Amazon SNS:** Email notifications are delivered to the security contact.
 
 ![image](images/53.jpg)
 ![image](images/54.jpg)
@@ -177,7 +208,7 @@ The final phase was to test the system by simulating the two defined attack scen
 ![image](images/61.jpg)
 ![image](images/62.jpg)
 
-* **Result:** The system worked perfectly.
+* **Result:** The system responded as designed.
 - The CloudWatch Alarm successfully transitioned to the **"In alarm"** state.
 
 ![image](images/63.jpg)

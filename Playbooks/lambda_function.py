@@ -1,139 +1,113 @@
 import json
-import boto3
 import os
-from datetime import datetime
 
-# Khởi tạo các client của AWS
-ec2 = boto3.client('ec2')
-s3 = boto3.client('s3')
-sns = boto3.client('sns')
+import boto3
 
-# Lấy ARN của SNS Topic từ biến môi trường
-SNS_TOPIC_ARN = os.environ['SNS_TOPIC_ARN']
+ec2 = boto3.client("ec2")
+sns = boto3.client("sns")
+
+SNS_TOPIC_ARN = os.environ["SNS_TOPIC_ARN"]
+QUARANTINE_SG_NAME = "Quarantine-SG"
+
 
 def lambda_handler(event, context):
-    """
-    Hàm chính, được kích hoạt bởi EventBridge.
-    Phân tích sự kiện để xác định nguồn gốc và gọi hàm xử lý tương ứng.
-    """
-    print("Sự kiện nhận được:", json.dumps(event))
+    """Route EventBridge events to the matching response playbook."""
+    print("Received event:", json.dumps(event))
 
-    # Xác định nguồn gốc của sự kiện
-    source = event.get('source')
-    detail_type = event.get('detail-type')
-
-    response_message = ""
+    source = event.get("source")
+    detail_type = event.get("detail-type")
 
     try:
         if source == "aws.guardduty":
-            response_message = handle_lateral_movement(event)
+            message = handle_lateral_movement(event)
         elif source == "aws.cloudwatch" and detail_type == "CloudWatch Alarm State Change":
-            response_message = handle_s3_exfiltration(event)
+            message = handle_s3_exfiltration(event)
         else:
-            print("Sự kiện không xác định, bỏ qua.")
-            return
+            print("Unrecognized event source, skipping.")
+            return {"statusCode": 200, "body": json.dumps("Event ignored")}
 
-        # Gửi thông báo sau khi xử lý
-        if response_message:
-            send_sns_notification(response_message)
-
-    except Exception as e:
-        error_message = f"Lỗi xảy ra khi xử lý sự kiện: {str(e)}"
+        send_sns_notification(message)
+    except Exception as exc:
+        error_message = f"Error while handling event: {exc}"
         print(error_message)
         send_sns_notification(error_message)
 
-    return {
-        'statusCode': 200,
-        'body': json.dumps('Xử lý hoàn tất!')
-    }
+    return {"statusCode": 200, "body": json.dumps("Event processed")}
 
 
 def handle_lateral_movement(event):
-    """
-    Xử lý phát hiện Dịch chuyển ngang từ GuardDuty.
-    Hành động: Cô lập EC2 và tạo Snapshot.
-    """
-    finding_type = event['detail']['type']
-    instance_id = event['detail']['resource']['instanceDetails']['instanceId']
-    
-    print(f"Phát hiện Dịch chuyển ngang: {finding_type} trên instance {instance_id}")
+    """Isolate the affected EC2 instance and preserve forensic evidence."""
+    finding_type = event["detail"]["type"]
+    instance_id = event["detail"]["resource"]["instanceDetails"]["instanceId"]
 
-    # 1. Cô lập instance bằng cách thay đổi Security Group
-    # Tạo một security group mới tên là 'Quarantine-SG' nếu chưa có.
-    # Trong môi trường thực tế, bạn nên tạo sẵn SG này.
-    quarantine_sg_name = 'Quarantine-SG'
-    vpc_id = event['detail']['resource']['instanceDetails']['networkInterfaces'][0]['vpcId']
-    
+    print(f"Lateral movement detected: {finding_type} on instance {instance_id}")
+
+    vpc_id = event["detail"]["resource"]["instanceDetails"]["networkInterfaces"][0]["vpcId"]
+
     try:
-        response = ec2.describe_security_groups(Filters=[{'Name': 'group-name', 'Values': [quarantine_sg_name]}, {'Name': 'vpc-id', 'Values': [vpc_id]}])
-        quarantine_sg_id = response['SecurityGroups'][0]['GroupId']
-    except Exception:
-        print(f"Chưa có Security Group '{quarantine_sg_name}', đang tạo mới...")
-        quarantine_sg = ec2.create_security_group(
-            GroupName=quarantine_sg_name,
-            Description='Deny all inbound and outbound traffic',
-            VpcId=vpc_id
+        response = ec2.describe_security_groups(
+            Filters=[
+                {"Name": "group-name", "Values": [QUARANTINE_SG_NAME]},
+                {"Name": "vpc-id", "Values": [vpc_id]},
+            ]
         )
-        quarantine_sg_id = quarantine_sg['GroupId']
+        quarantine_sg_id = response["SecurityGroups"][0]["GroupId"]
+    except Exception:
+        print(f"Security group '{QUARANTINE_SG_NAME}' not found, creating it.")
+        quarantine_sg = ec2.create_security_group(
+            GroupName=QUARANTINE_SG_NAME,
+            Description="Deny all inbound and outbound traffic",
+            VpcId=vpc_id,
+        )
+        quarantine_sg_id = quarantine_sg["GroupId"]
 
     ec2.modify_instance_attribute(InstanceId=instance_id, Groups=[quarantine_sg_id])
-    print(f"Đã cô lập thành công instance {instance_id} bằng Security Group {quarantine_sg_id}")
+    print(f"Isolated instance {instance_id} with security group {quarantine_sg_id}")
 
-    # 2. Tạo Snapshot để điều tra
-    volume_id = ec2.describe_instances(InstanceIds=[instance_id])['Reservations'][0]['Instances'][0]['BlockDeviceMappings'][0]['Ebs']['VolumeId']
+    volume_id = ec2.describe_instances(InstanceIds=[instance_id])["Reservations"][0][
+        "Instances"
+    ][0]["BlockDeviceMappings"][0]["Ebs"]["VolumeId"]
     snapshot = ec2.create_snapshot(
         VolumeId=volume_id,
-        Description=f"Forensic snapshot for instance {instance_id} due to {finding_type}"
+        Description=f"Forensic snapshot for instance {instance_id} due to {finding_type}",
     )
-    print(f"Đã tạo thành công snapshot {snapshot['SnapshotId']} cho volume {volume_id}")
+    print(f"Created snapshot {snapshot['SnapshotId']} for volume {volume_id}")
 
-    message = (
-        f"🚨 [CẢNH BÁO AN NINH - DỊCH CHUYỂN NGANG]\n\n"
-        f"Loại phát hiện: {finding_type}\n"
-        f"Instance bị ảnh hưởng: {instance_id}\n\n"
-        f"✅ HÀNH ĐỘNG TỰ ĐỘNG:\n"
-        f"  - Đã cô lập Instance bằng Security Group: {quarantine_sg_id}\n"
-        f"  - Đã tạo Snapshot để điều tra: {snapshot['SnapshotId']}"
+    return (
+        "[SECURITY ALERT - LATERAL MOVEMENT]\n\n"
+        f"Finding type: {finding_type}\n"
+        f"Affected instance: {instance_id}\n\n"
+        "AUTOMATED RESPONSE:\n"
+        f"  - Instance isolated with security group: {quarantine_sg_id}\n"
+        f"  - Forensic snapshot created: {snapshot['SnapshotId']}"
     )
-    return message
 
 
 def handle_s3_exfiltration(event):
-    """
-    Xử lý cảnh báo Đánh cắp dữ liệu S3 từ CloudWatch.
-    Hành động: Gắn thẻ (Tag) vào các đối tượng S3 liên quan.
-    """
-    alarm_name = event['detail']['alarmName']
-    
-    # CloudTrail log không chứa trực tiếp tên file,
-    # nên hành động thực tế sẽ phức tạp hơn.
-    # Ở đây, chúng ta chỉ mô phỏng hành động và gửi thông báo.
-    print(f"Phát hiện Đánh cắp dữ liệu S3 từ Alarm: {alarm_name}")
+    """Raise an alert for the S3 data exfiltration CloudWatch alarm."""
+    alarm_name = event["detail"]["alarmName"]
+    print(f"S3 exfiltration alarm received: {alarm_name}")
 
-    # Trong một kịch bản nâng cao, bạn sẽ cần truy vấn CloudTrail log
-    # để tìm chính xác các file đã bị truy cập trong khoảng thời gian xảy ra alarm.
-    # Ví dụ: s3.put_object_tagging(...)
-    
-    message = (
-        f"🚨 [CẢNH BÁO AN NINH - ĐÁNH CẮP DỮ LIỆU S3]\n\n"
-        f"Tên cảnh báo: {alarm_name}\n"
-        f"Mô tả: Phát hiện số lượng lớn hành vi tải file từ S3.\n\n"
-        f"✅ HÀNH ĐỘNG TỰ ĐỘNG:\n"
-        f"  - Đã ghi nhận sự kiện. Hãy kiểm tra CloudTrail log để xác định các file bị ảnh hưởng."
+    # The alarm payload does not identify the accessed objects. A production
+    # playbook would query CloudTrail for the GetObject calls behind the alarm
+    # and act on those objects, for example with s3.put_object_tagging().
+    return (
+        "[SECURITY ALERT - S3 DATA EXFILTRATION]\n\n"
+        f"Alarm: {alarm_name}\n"
+        "Description: A high volume of S3 GetObject calls was detected.\n\n"
+        "AUTOMATED RESPONSE:\n"
+        "  - Event recorded. Review CloudTrail logs to identify the affected objects."
     )
-    return message
 
 
 def send_sns_notification(message):
-    """
-    Gửi thông báo đến SNS Topic.
-    """
+    """Publish an alert to the configured SNS topic."""
     try:
         sns.publish(
             TopicArn=SNS_TOPIC_ARN,
             Message=message,
-            Subject='Cảnh báo An ninh Tự động từ Hệ thống CDR'
+            Subject="Automated Security Alert - TraceVanta",
         )
-        print("Đã gửi thông báo thành công đến SNS.")
-    except Exception as e:
-        print(f"Lỗi khi gửi thông báo SNS: {str(e)}")
+        print("SNS notification sent.")
+    except Exception as exc:
+        print(f"Failed to send SNS notification: {exc}")
